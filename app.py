@@ -307,7 +307,7 @@ def load_csv_local(fname: str) -> pd.DataFrame:
     p = Path(fname)
     if not p.exists():
         raise FileNotFoundError(f"File not found: {p.resolve()}")
-    return pd.read_csv(p)
+    return pd.read_parquet(p)
 
 def pick_base_column(df: pd.DataFrame) -> List[str]:
     candidates = []
@@ -344,14 +344,14 @@ with st.sidebar:
     st.header("Controls")
     data_level = st.radio(
         "Data level",
-        ["Pack level (mydata_mom_option.csv)", "Child level (mydata_mom_option_child.csv)"],
+        ["Pack level Data)", "Child level Data"],
         index=0
     )
     st.markdown("---")
 
 # Load selected dataset (no uploads; files must exist locally)
-main_file = "mydata_mom_option.csv"
-child_file = "mydata_mom_option_child.csv"
+main_file = "mydata_mom_option.parquet"
+child_file = "mydata_mom_option_child.parquet"
 try:
     if data_level.startswith("Pack"):
         df = load_csv_local(main_file)
