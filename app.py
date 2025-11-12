@@ -329,7 +329,7 @@ with st.sidebar:
 
     data_mode = st.selectbox(
         "Row selection",
-        ["All rows", "Packs only (pack_qty ≥ 1)", "Non-packs only (pack_qty = 0 or NaN)"],
+        ["All rows", "Packs only (pack_qty ≥ 2)", "Non-packs only (pack_qty = 1 or NaN)"],
         index=0
     )
 
@@ -373,10 +373,10 @@ with st.sidebar:
 
 # Apply packs / non-packs mode
 if "pack_qty" in df.columns:
-    if data_mode == "Packs only (pack_qty ≥ 1)":
-        df_view = df.loc[(df["pack_qty"] >= 1)]
-    elif data_mode == "Non-packs only (pack_qty = 0 or NaN)":
-        df_view = df.loc[(df["pack_qty"].fillna(0) == 0)]
+    if data_mode == "Packs only (pack_qty ≥ 2)":
+        df_view = df.loc[(df["pack_qty"] >= 2)]
+    elif data_mode == "Non-packs only (pack_qty = 1 or NaN)":
+        df_view = df.loc[(df["pack_qty"].fillna(0) == 1)]
     else:
         df_view = df.copy()
 else:
