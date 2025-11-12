@@ -1,7 +1,10 @@
 
-# inventory_streamlit_app.py
-# Streamlit dashboard for Inventory Views (packs / non-packs) using Plotly
-# - Drop this file next to your CSVs and run:  streamlit run inventory_streamlit_app.py
+# inventory_streamlit_app_v2.py
+# Streamlit dashboard for Inventory Views (Pack vs Child level) using Plotly
+# Files are expected to be present locally:
+#   - mydata_mom_option.csv            (Pack-level / option-level)
+#   - mydata_mom_option_child.csv      (Child-level)
+# Run:  streamlit run inventory_streamlit_app_v2.py
 
 from typing import Optional, Iterable, Dict, List
 import streamlit as st
@@ -129,7 +132,6 @@ def _grouped_bar(fig_title: str, x_labels: List[str], series_labels: List[str],
                 name=series, x=x_labels, y=matrix_y[:, j], customdata=custom,
                 hovertemplate=(
                     "<b>%{x}</b><br>" + series + "<br>" +
-                    "Count: %{customdata[0]}<br>" +
                     ytitle + ": %{customdata[1]:.2f}<br>" +
                     "Revenue: ₹%{customdata[2]:,.0f}<br>" +
                     "Revenue Share: %{customdata[3]:.2f}%<extra></extra>"
@@ -142,7 +144,7 @@ def _grouped_bar(fig_title: str, x_labels: List[str], series_labels: List[str],
 
 def build_inventory_figures(
     df: pd.DataFrame,
-    channel: Optional[Iterable[str]] = None,
+    channel: Optional[str] = None,
     cat_l2: Optional[Iterable[str]] = None,
     cat_l3: Optional[Iterable[str]] = None,
     fixed_base_col: Optional[str] = None,
@@ -158,8 +160,9 @@ def build_inventory_figures(
 
     buckets = _sorted_unique(work["DOH_bucket"].astype(str))
 
-    # Apply filters
-    work = _apply_filters(work, channel=channel, cat_l2=cat_l2, cat_l3=cat_l3)
+    # Apply filters (channel is SINGLE selection)
+    ch_filter = None if (channel in (None, "<All>")) else channel
+    work = _apply_filters(work, channel=ch_filter, cat_l2=cat_l2, cat_l3=cat_l3)
 
     # Base for constant denominator
     if fixed_base_col is not None and fixed_base_col in work.columns:
@@ -278,12 +281,13 @@ def build_inventory_figures(
         revenue=("revenue", "sum")
     ).reset_index()
     if not cons.empty:
-        pv_count = cons.pivot(index="DOH_bucket", columns="Availability", values="option_count").reindex(index=buckets, columns=_order_availability(_sorted_unique(cons["Availability"].astype(str))), fill_value=0)
-        pv_rev   = cons.pivot(index="DOH_bucket", columns="Availability", values="revenue").reindex(index=buckets, columns=_order_availability(_sorted_unique(cons["Availability"].astype(str))), fill_value=0.0)
+        ord_av = _order_availability(_sorted_unique(cons["Availability"].astype(str)))
+        pv_count = cons.pivot(index="DOH_bucket", columns="Availability", values="option_count").reindex(index=buckets, columns=ord_av, fill_value=0)
+        pv_rev   = cons.pivot(index="DOH_bucket", columns="Availability", values="revenue").reindex(index=buckets, columns=ord_av, fill_value=0.0)
         rev_row_sum = pv_rev.sum(axis=1).replace(0, np.nan)
         pv_rev_pct = (pv_rev.div(rev_row_sum, axis=0) * 100.0).fillna(0.0)
         fig = _grouped_bar("Exclusive Fill Count — Consolidated (all months)",
-                           buckets, _order_availability(_sorted_unique(cons["Availability"].astype(str))),
+                           buckets, ord_av,
                            pv_count.to_numpy().astype(float), pv_count.to_numpy(), pv_rev.to_numpy(), pv_rev_pct.to_numpy(),
                            ytitle="# options")
         exclusive_figs["consolidated"] = fig
@@ -299,16 +303,16 @@ def build_inventory_figures(
 # ---------------------------- Data loading ----------------------------
 
 @st.cache_data(show_spinner=False)
-def load_csv(path_or_buffer) -> pd.DataFrame:
-    df = pd.read_csv(path_or_buffer)
-    return df
+def load_csv_local(fname: str) -> pd.DataFrame:
+    p = Path(fname)
+    if not p.exists():
+        raise FileNotFoundError(f"File not found: {p.resolve()}")
+    return pd.read_csv(p)
 
-def pick_base_column(df: pd.DataFrame) -> Optional[str]:
-    # Propose boolean-like columns for fixed base
+def pick_base_column(df: pd.DataFrame) -> List[str]:
     candidates = []
     for c in df.columns:
         s = df[c].dropna()
-        # Boolean or 0/1-ish
         if s.dtype == bool:
             candidates.append(c)
         else:
@@ -319,144 +323,183 @@ def pick_base_column(df: pd.DataFrame) -> Optional[str]:
 
 # ---------------------------- UI ----------------------------
 
-st.set_page_config(page_title="Inventory Mix Dashboard", layout="wide")
-st.title("Inventory Mix Dashboard (Packs / Non-packs)")
+st.set_page_config(page_title="Inventory Mix Dashboard", page_icon="📊", layout="wide")
 
+# Light styling
+st.markdown("""
+    <style>
+    .block-container {padding-top: 1.2rem; padding-bottom: 1rem;}
+    h1, h2, h3, h4 { font-weight: 700; }
+    .metric-small span { font-size: 0.9rem !important; }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] { padding: 8px 14px; border-radius: 10px; }
+    </style>
+""", unsafe_allow_html=True)
+
+st.title("📦 Inventory Mix Dashboard")
+st.caption("Choose **data level** (Pack vs Child), then slice by Channel, categories and pack quantity. Charts refresh automatically.")
+
+# Sidebar controls
 with st.sidebar:
-    st.header("Data")
-    uploaded_main = st.file_uploader("Upload mydata_mom_option.csv", type=["csv"], key="main_csv")
-    uploaded_child = st.file_uploader("Upload mydata_mom_option_child.csv (optional)", type=["csv"], key="child_csv")
-
-    data_mode = st.selectbox(
-        "Row selection",
-        ["All rows", "Packs only (pack_qty ≥ 2)", "Non-packs only (pack_qty = 1 or NaN)"],
+    st.header("Controls")
+    data_level = st.radio(
+        "Data level",
+        ["Pack level (mydata_mom_option.csv)", "Child level (mydata_mom_option_child.csv)"],
         index=0
     )
-
     st.markdown("---")
-    st.header("Filters")
 
-if uploaded_main is not None:
-    df = load_csv(uploaded_main)
-else:
-    # fallback to local file name if present
-    local = Path("mydata_mom_option.csv")
-    if local.exists():
-        df = load_csv(local)
+# Load selected dataset (no uploads; files must exist locally)
+main_file = "mydata_mom_option.csv"
+child_file = "mydata_mom_option_child.csv"
+try:
+    if data_level.startswith("Pack"):
+        df = load_csv_local(main_file)
     else:
-        st.warning("Please upload **mydata_mom_option.csv** to proceed.")
-        st.stop()
+        df = load_csv_local(child_file)
+except FileNotFoundError as e:
+    st.error(str(e))
+    st.stop()
 
 # Basic validation
 required = ["year_month", "DOH_bucket", "Availability", "optioncode", "Revenue"]
 missing = [c for c in required if c not in df.columns]
 if missing:
-    st.error(f"Missing required columns: {missing}")
+    st.error(f"Missing required columns in selected dataset: {missing}")
     st.stop()
 
-# Optional filters sourced from dataset
+# Sidebar filters — Channel single-select; cat_l2/cat_l3 multiselect
 channels = sorted(pd.Series(df["Channel"].dropna().unique()).tolist()) if "Channel" in df.columns else []
+with st.sidebar:
+    if channels:
+        sel_channel = st.selectbox("Channel (single)", ["<All>"] + channels, index=0)
+    else:
+        sel_channel = None
+
 cats2 = sorted(pd.Series(df["cat_l2"].dropna().unique()).tolist()) if "cat_l2" in df.columns else []
 cats3 = sorted(pd.Series(df["cat_l3"].dropna().unique()).tolist()) if "cat_l3" in df.columns else []
-buckets = _sorted_unique(df["DOH_bucket"].astype(str).tolist())
 
 with st.sidebar:
-    sel_channels = st.multiselect("Channel", channels, default=channels if channels else None)
     sel_cat_l2 = st.multiselect("cat_l2", cats2, default=cats2 if cats2 else None)
     sel_cat_l3 = st.multiselect("cat_l3", cats3, default=cats3 if cats3 else None)
+
+    # Pack quantity filter — only show for PACK LEVEL dataset
+    sel_pack_qty = None
+    if data_level.startswith("Pack") and ("pack_qty" in df.columns):
+        pq = pd.to_numeric(df["pack_qty"], errors="coerce")
+        unique_packs = sorted([int(x) for x in pq.dropna().unique() if x == int(x)])
+        if unique_packs:
+            sel_pack_qty = st.multiselect("Pack quantity (choose 1/2/3/...)", unique_packs, default=unique_packs)
+
     base_candidates = pick_base_column(df)
-    use_base = st.selectbox(
-        "Fixed base column (optional)",
-        ["<None>"] + base_candidates if base_candidates else ["<None>"]
-    )
+    use_base = st.selectbox("Fixed base column (optional)", ["<None>"] + base_candidates if base_candidates else ["<None>"])
     fixed_base_col = None if use_base == "<None>" else use_base
 
-# Apply packs / non-packs mode
-if "pack_qty" in df.columns:
-    if data_mode == "Packs only (pack_qty ≥ 2)":
-        df_view = df.loc[(df["pack_qty"] >= 2)]
-    elif data_mode == "Non-packs only (pack_qty = 1 or NaN)":
-        df_view = df.loc[(df["pack_qty"].fillna(0) == 1)]
-    else:
-        df_view = df.copy()
-else:
-    df_view = df.copy()
+    if st.button("Reset filters"):
+        st.experimental_rerun()
 
-# Build figures
-figs = build_inventory_figures(
+# Start from dataset; apply PACK filter only if Pack-level selected
+df_view = df.copy()
+if data_level.startswith("Pack") and (sel_pack_qty is not None):
+    if "pack_qty" in df_view.columns:
+        pq = pd.to_numeric(df_view["pack_qty"], errors="coerce").astype("Int64")
+        df_view = df_view.loc[pq.isin(sel_pack_qty)]
+
+# Compose final export dataframe using channel & cat filters as well
+ch_filter = None if (sel_channel in (None, "<All>")) else sel_channel
+df_export = _apply_filters(
     df_view,
-    channel=sel_channels if sel_channels else None,
+    channel=ch_filter,
     cat_l2=sel_cat_l2 if sel_cat_l2 else None,
-    cat_l3=sel_cat_l3 if sel_cat_l3 else None,
-    fixed_base_col=fixed_base_col
+    cat_l3=sel_cat_l3 if sel_cat_l3 else None
 )
 
-# Layout
+# KPI header based on df_export
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("Unique options", int(df_export["optioncode"].nunique()))
+with col2:
+    st.metric("Months covered", int(pd.Series(_month_key(df_export["year_month"])).nunique()))
+with col3:
+    st.metric("Total Revenue (₹)", f"{df_export['Revenue'].sum():,.0f}")
+with col4:
+    st.metric("DOH buckets", int(df_export["DOH_bucket"].astype(str).nunique()))
+
+# Build figures from the final filtered dataframe (so figures & export match 1:1)
+with st.spinner("Building charts..."):
+    figs = build_inventory_figures(
+        df_export,
+        channel=None,  # already filtered
+        cat_l2=None,
+        cat_l3=None,
+        fixed_base_col=fixed_base_col
+    )
+
+# Layout + nicer tabs
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "DOH Mix 100% by Month",
-    "Faceted: Month × DOH Bucket",
-    "Constant Base (Buying Lens)",
-    "In-bucket 100% Split",
-    "Exclusive Views",
-    "Data Preview"
+    "📊 DOH Mix",
+    "🧭 Month × DOH",
+    "📈 Constant Base",
+    "🧩 In-bucket 100%",
+    "🏷️ Exclusive",
+    "🗂️ Data Preview / Export"
 ])
 
 with tab1:
     st.subheader("DOH Mix 100% by Month")
+    st.caption("Portfolio mix across DOH buckets, normalized to 100% each month.")
     st.plotly_chart(figs["doh_mix_100pct_by_month"], use_container_width=True)
 
 with tab2:
     st.subheader("Faceted 100% Split — Month × DOH Bucket")
-    for b, f in figs["facets"].items():
-        st.markdown(f"**DOH Bucket: {b}**")
-        st.plotly_chart(f, use_container_width=True)
+    st.caption("For each DOH bucket, Availability split is normalized to 100% per month.")
+    buckets = list(figs["facets"].keys())
+    if buckets:
+        cols = st.columns(2)
+        for i, b in enumerate(buckets):
+            with cols[i % 2]:
+                st.markdown(f"**DOH Bucket: {b}**")
+                st.plotly_chart(figs["facets"][b], use_container_width=True)
+    else:
+        st.info("No facet figures to show for current filters.")
 
 with tab3:
     st.subheader("Share of Total by Month — Constant Base")
+    st.caption("Availability share computed against a fixed denominator (unique options in base).")
     for b, f in figs["share_of_total_by_month"].items():
         st.markdown(f"**DOH Bucket: {b}**")
         st.plotly_chart(f, use_container_width=True)
 
 with tab4:
     st.subheader("Share in Bucket by Month — 100% Split")
+    st.caption("Within each DOH bucket, Availability distribution is normalized to 100% per month.")
     for b, f in figs["share_in_bucket_by_month"].items():
         st.markdown(f"**DOH Bucket: {b}**")
         st.plotly_chart(f, use_container_width=True)
 
 with tab5:
     st.subheader("Exclusive Fill-Rate vs DOH")
+    st.caption("Each option tagged into exactly one availability bucket based on priority, then aggregated.")
     excl = figs["exclusive"]
     for k, f in excl.items():
-        if f is None: 
+        if f is None:
             continue
         st.markdown(f"**{k.replace('_',' ').title()}**")
         st.plotly_chart(f, use_container_width=True)
 
 with tab6:
-    st.subheader("Data Preview & Distincts")
-    st.write("First 100 rows:")
-    st.dataframe(df_view.head(100))
-    if "Channel" in df_view.columns:
-        st.write("Distinct Channels (first 50):", sorted(df_view["Channel"].dropna().unique().tolist())[:50])
-    if "cat_l2" in df_view.columns:
-        st.write("Distinct cat_l2 (first 50):", sorted(df_view["cat_l2"].dropna().unique().tolist())[:50])
-    if "cat_l3" in df_view.columns:
-        st.write("Distinct cat_l3 (first 50):", sorted(df_view["cat_l3"].dropna().unique().tolist())[:50])
-    if "DOH_bucket" in df_view.columns:
-        st.write("Distinct DOH_bucket:", _sorted_unique(df_view["DOH_bucket"].astype(str).tolist()))
+    st.subheader("Data Preview & Export")
+    st.caption("This table reflects the **final filtered dataframe** used for all charts above.")
+    st.dataframe(df_export.head(200), use_container_width=True)
 
-# Optional child-level preview
-if uploaded_child is not None:
-    try:
-        child_df = load_csv(uploaded_child)
-        with st.expander("Child dataset preview"):
-            st.dataframe(child_df.head(100))
-            if "optioncode" in child_df.columns:
-                st.write("Child distinct optioncode:", child_df["optioncode"].nunique())
-            if "sku" in child_df.columns:
-                st.write("Child distinct sku:", child_df["sku"].nunique())
-    except Exception as e:
-        st.warning(f"Could not read child file: {e}")
+    # Export button
+    csv_bytes = df_export.to_csv(index=False).encode("utf-8-sig")
+    fname = f"inventory_filtered_{'pack' if data_level.startswith('Pack') else 'child'}.csv"
+    st.download_button(
+        "⬇️ Download filtered CSV",
+        data=csv_bytes,
+        file_name=fname,
+        mime="text/csv"
+    )
 
-st.caption("Tip: Use the sidebar filters to slice the figures by Channel, cat_l2, and cat_l3. Toggle packs/non-packs in 'Row selection'.")
-
+st.caption("Tip: Channel is a single-select; Pack quantity filter appears only for the Pack-level dataset and expects discrete values like 1, 2, 3, ...")
